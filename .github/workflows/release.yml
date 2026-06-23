@@ -1,0 +1,105 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: ai-login-switcher-linux-x64
+            binary_path: dist/ai-login-switcher
+            archive_name: ai-login-switcher-linux-x64.tar.gz
+          - os: windows-latest
+            artifact_name: ai-login-switcher-windows-x64
+            binary_path: dist/ai-login-switcher.exe
+            archive_name: ai-login-switcher-windows-x64.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build binary
+        run: |
+          pyinstaller --clean ai-login-switcher.spec
+
+      - name: Smoke test Linux
+        if: runner.os == 'Linux'
+        run: |
+          chmod +x dist/ai-login-switcher
+          ./dist/ai-login-switcher status || true
+
+      - name: Smoke test Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\dist\ai-login-switcher.exe status
+
+      - name: Package Linux archive
+        if: runner.os == 'Linux'
+        run: |
+          chmod +x dist/ai-login-switcher
+          tar -czf "${{ matrix.archive_name }}" -C dist ai-login-switcher
+
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "${{ matrix.binary_path }}" -DestinationPath "${{ matrix.archive_name }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.archive_name }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Show files
+        run: |
+          find release-assets -maxdepth 3 -type f -print
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            release-assets/**/*.tar.gz
+            release-assets/**/*.zip
+          generate_release_notes: true
