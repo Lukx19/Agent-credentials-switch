@@ -1,0 +1,260 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+  pull_request:
+    branches:
+      - main
+    types:
+      - closed
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.merged == true
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: ai-login-switcher-linux-x64
+            binary_path: dist/ai-login-switcher
+            archive_name: ai-login-switcher-linux-x64.tar.gz
+          - os: windows-latest
+            artifact_name: ai-login-switcher-windows-x64
+            binary_path: dist/ai-login-switcher.exe
+            archive_name: ai-login-switcher-windows-x64.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build binary
+        run: |
+          pyinstaller --clean ai-login-switcher.spec
+
+      - name: Smoke test Linux
+        if: runner.os == 'Linux'
+        run: |
+          chmod +x dist/ai-login-switcher
+          ./dist/ai-login-switcher status || true
+
+      - name: Smoke test Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\dist\ai-login-switcher.exe status
+
+      - name: Package Linux archive
+        if: runner.os == 'Linux'
+        run: |
+          chmod +x dist/ai-login-switcher
+          tar -czf "${{ matrix.archive_name }}" -C dist ai-login-switcher
+
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "${{ matrix.binary_path }}" -DestinationPath "${{ matrix.archive_name }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.archive_name }}
+          if-no-files-found: error
+
+  auto-tag:
+    name: Create release tag
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
+    needs:
+      - build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag_name: ${{ steps.next-tag.outputs.tag_name }}
+      bump_type: ${{ steps.next-tag.outputs.bump_type }}
+
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Create next version tag and release notes
+        id: next-tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          event_path = Path(os.environ["GITHUB_EVENT_PATH"])
+          event = json.loads(event_path.read_text(encoding="utf-8"))
+          pull_request = event.get("pull_request") or {}
+          labels = [str(label.get("name", "")).lower() for label in pull_request.get("labels", [])]
+          bump_type = "patch" if "bugfix" in labels else "minor"
+
+          tags = subprocess.check_output(
+              ["git", "tag", "-l", "v[0-9]*.[0-9]*.[0-9]*", "--sort=-v:refname"],
+              text=True,
+          ).splitlines()
+
+          if not tags:
+              major, minor, patch = 0, 1, 0
+          else:
+              match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tags[0])
+              if not match:
+                  raise SystemExit(f"Latest version tag is not semver-like: {tags[0]}")
+              major, minor, patch = map(int, match.groups())
+              if bump_type == "patch":
+                  patch += 1
+              else:
+                  minor += 1
+                  patch = 0
+
+          next_tag = f"v{major}.{minor}.{patch}"
+          while subprocess.run(
+              ["git", "rev-parse", "-q", "--verify", f"refs/tags/{next_tag}"],
+              stdout=subprocess.DEVNULL,
+              stderr=subprocess.DEVNULL,
+              check=False,
+          ).returncode == 0:
+              if bump_type == "patch":
+                  patch += 1
+              else:
+                  minor += 1
+                  patch = 0
+              next_tag = f"v{major}.{minor}.{patch}"
+
+          title = str(pull_request.get("title") or f"Release {next_tag}").strip()
+          body = str(pull_request.get("body") or "").strip()
+          pr_number = pull_request.get("number")
+          pr_url = pull_request.get("html_url")
+          label_list = ", ".join(label.get("name", "") for label in pull_request.get("labels", [])) or "none"
+
+          release_body = [
+              f"# {title}",
+              "",
+              "## Release Type",
+              f"- Version: `{next_tag}`",
+              f"- Bump: `{bump_type}`",
+              f"- PR labels: {label_list}",
+          ]
+          if pr_number and pr_url:
+              release_body.append(f"- Pull request: #{pr_number} ({pr_url})")
+
+          release_body.extend(
+              [
+                  "",
+                  "## What Changed / Fixed",
+                  body or "No pull request description was provided.",
+                  "",
+                  "## Breaking Changes",
+                  "If this release includes breaking changes, they should be listed in the pull request description above. Otherwise, none were specified.",
+                  "",
+              ]
+          )
+          Path("release-body.md").write_text("\n".join(release_body), encoding="utf-8")
+          Path("next-tag.txt").write_text(next_tag, encoding="utf-8")
+
+          output_path = Path(os.environ["GITHUB_OUTPUT"])
+          with output_path.open("a", encoding="utf-8") as output:
+              output.write(f"tag_name={next_tag}\n")
+              output.write(f"bump_type={bump_type}\n")
+          PY
+
+          next_tag="$(cat next-tag.txt)"
+          git tag -a "$next_tag" -m "Release $next_tag"
+          git push origin "$next_tag"
+
+      - name: Upload release notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-body.md
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    if: >-
+      always() &&
+      needs.build.result == 'success' &&
+      (
+        startsWith(github.ref, 'refs/tags/v') ||
+        (github.event_name == 'pull_request' && github.event.pull_request.merged == true && needs.auto-tag.result == 'success')
+      )
+    needs:
+      - build
+      - auto-tag
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Prepare release body
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -f release-assets/release-notes/release-body.md ]]; then
+            cp release-assets/release-notes/release-body.md release-body.md
+          else
+            cat > release-body.md <<'EOF'
+          ## What Changed / Fixed
+
+          See the commits included in this tag for details.
+
+          ## Breaking Changes
+
+          None specified.
+          EOF
+          fi
+
+      - name: Show files
+        run: |
+          find release-assets -maxdepth 3 -type f -print
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.auto-tag.outputs.tag_name || github.ref_name }}
+          body_path: release-body.md
+          files: |
+            release-assets/**/*.tar.gz
+            release-assets/**/*.zip
