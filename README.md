@@ -112,14 +112,16 @@ Windows PowerShell:
 
 ## Release
 
-Push a tag:
+Merging a pull request into `main` runs the build workflow and automatically creates the next minor version tag. For example, if the latest release tag is `v0.1.0`, the merge creates `v0.2.0`. If no `v*.*.*` tag exists yet, the workflow creates `v0.1.0`.
+
+The new tag triggers the release workflow, which builds Windows/Linux binaries and publishes a GitHub Release.
+
+You can also create a release manually by pushing a matching tag yourself:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
-
-GitHub Actions will build Windows/Linux binaries and publish a release.
 
 ## Release flow
 
@@ -130,12 +132,9 @@ git commit -m "Initial ai-login-switcher"
 git branch -M main
 git remote add origin git@github.com:YOUR_USER/ai-login-switcher.git
 git push -u origin main
-
-git tag v0.1.0
-git push origin v0.1.0
 ```
 
-That tag triggers the workflow and produces:
+A merge or push to `main` creates the next minor tag automatically. That tag triggers the workflow and produces:
 
 - `ai-login-switcher-linux-x64.tar.gz`
 - `ai-login-switcher-windows-x64.zip`
