@@ -39,7 +39,7 @@ def test_detects_valid_codex_auth_file(isolated_switcher):
     write_json(root / "auth.json", {"tokens": {"access_token": "token"}})
 
     assert switcher.has_valid_credentials("codex", root)
-    assert switcher.credential_status_for_root("codex", root) == "valid auth.json"
+    assert switcher.credential_status_for_root("codex", root) == "valid Codex credentials (auth.json)"
 
 
 def test_capture_and_switch_with_dummy_homes(isolated_switcher, monkeypatch):
@@ -82,3 +82,47 @@ def test_status_summary_extracts_token_usage_from_status_json():
     assert "input: 100" in summary
     assert "output: 25" in summary
     assert "cost: 0.12" in summary
+
+
+
+def test_detects_codex_credentials_json(isolated_switcher):
+    root = isolated_switcher / "codex"
+    write_json(root / "credentials.json", {"api_key": "codex-key"})
+
+    assert switcher.has_valid_credentials("codex", root)
+    assert switcher.credential_status_for_root("codex", root) == "valid Codex credentials (credentials.json)"
+
+
+def test_add_alias_captures_current_credentials(isolated_switcher, monkeypatch, capsys):
+    write_json(switcher.CODEX_TARGET / "auth.json", {"OPENAI_API_KEY": "codex-key"})
+    monkeypatch.setattr(switcher, "refresh_profile_identity", lambda tool, profile_id: switcher.ToolIdentity(logged_in="true"))
+    monkeypatch.setattr(switcher.sys, "argv", ["ai-login-switcher", "add", "codex", "work-codex"])
+
+    switcher.main()
+
+    assert switcher.has_valid_credentials("codex", switcher.profile_tool_dir("work-codex", "codex"))
+    assert "Saved codex credentials as: work-codex" in capsys.readouterr().out
+
+
+def test_help_command_prints_usage(monkeypatch, capsys):
+    monkeypatch.setattr(switcher.sys, "argv", ["ai-login-switcher", "help"])
+
+    switcher.main()
+
+    output = capsys.readouterr().out
+    assert "Switch between saved Claude and Codex credentials" in output
+    assert "refresh" in output
+
+
+
+def test_status_auto_imports_existing_credentials(isolated_switcher, capsys):
+    write_json(switcher.CLAUDE_TARGET / ".credentials.json", {"apiKey": "claude-key"})
+    write_json(switcher.CODEX_TARGET / "auth.json", {"OPENAI_API_KEY": "codex-key"})
+
+    switcher.print_status()
+
+    output = capsys.readouterr().out
+    assert "Claude: claude-default" in output
+    assert "Codex: codex-default" in output
+    assert switcher.has_valid_credentials("claude", switcher.profile_tool_dir("claude-default", "claude"))
+    assert switcher.has_valid_credentials("codex", switcher.profile_tool_dir("codex-default", "codex"))
