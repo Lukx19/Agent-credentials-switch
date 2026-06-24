@@ -4,6 +4,20 @@ A Windows/Linux TUI and CLI for switching local Claude Code and Codex login prof
 
 It keeps separate local credential/config folders for multiple accounts such as work, home, client, and empty-login profiles.
 
+## Install with pipx
+
+Install the Python package from PyPI:
+
+```bash
+pipx install ai-login-switcher
+```
+
+Upgrade later with:
+
+```bash
+pipx upgrade ai-login-switcher
+```
+
 ## Install from release
 
 Download the correct archive from GitHub Releases:
@@ -119,6 +133,8 @@ Merging a pull request into `main` runs the build workflow and automatically cre
 - If no `v*.*.*` tag exists yet, the workflow creates `v0.1.0`.
 
 The workflow uses the merged pull request description as the GitHub Release body so the release explains what is new or what was fixed. Every generated release body also includes an explicit `Breaking Changes` section.
+
+Every version-tagged release also builds and publishes the Python package to PyPI for `pipx` installs. See `docs/pypi-publishing.md` for the one-time PyPI trusted-publishing setup.
 
 You can also create a release manually by pushing a matching tag yourself:
 
