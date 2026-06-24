@@ -15,62 +15,67 @@ Extract it and place the executable somewhere on your PATH.
 
 ## Usage
 
-Open the TUI:
+This tool switches between saved Claude Code credentials and saved Codex credentials.
+Claude and Codex are controlled independently: one Claude credential and one Codex credential can be active at the same time, and each tool can have multiple saved logins.
+On first status/list/TUI run, existing credentials already present in `~/.claude` or `~/.codex` are imported automatically as `claude-default` or `codex-default` when no saved credential exists yet for that tool.
+
+Show the built-in command explanations:
+
+```bash
+ai-login-switcher help
+ai-login-switcher --help
+ai-login-switcher capture --help
+ai-login-switcher refresh --help
+```
+
+Open the guided TUI:
 
 ```bash
 ai-login-switcher tui
 ```
 
-Show active contexts:
+Show which Claude and Codex credentials are currently active:
 
 ```bash
 ai-login-switcher status
 ```
 
-Create profiles:
+Save the currently active Claude or Codex home-folder credentials under a name:
 
 ```bash
-ai-login-switcher init work
-ai-login-switcher init home
+ai-login-switcher add claude work-claude
+ai-login-switcher add codex work-codex
 ```
 
-Switch Claude to empty credentials so you can log in:
+To add another login for one tool, temporarily switch that tool to empty credentials, log in with the real CLI, then save the resulting credentials:
 
 ```bash
 ai-login-switcher switch claude --empty
 claude
-```
+ai-login-switcher add claude personal-claude
 
-Then capture the newly logged-in credentials:
-
-```bash
-ai-login-switcher capture claude work
-```
-
-Switch Codex to empty credentials:
-
-```bash
 ai-login-switcher switch codex --empty
 codex login
+ai-login-switcher add codex personal-codex
 ```
 
-Then capture:
+Switch only the tool you want to change. Switching Codex does not change Claude, and switching Claude does not change Codex:
 
 ```bash
-ai-login-switcher capture codex work
+ai-login-switcher switch claude work-claude
+ai-login-switcher switch codex personal-codex
 ```
 
-Switch active credentials:
+Refresh account metadata for the active credentials. This command does not require credential names:
 
 ```bash
-ai-login-switcher switch claude work
-ai-login-switcher switch codex home
+ai-login-switcher refresh
 ```
 
-Fetch account metadata from active CLI tools:
+The older `capture` command is still available and is the same as `add`:
 
 ```bash
-ai-login-switcher refresh-active
+ai-login-switcher capture codex work-codex
 ```
 
 ## Data location

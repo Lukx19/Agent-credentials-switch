@@ -18,7 +18,7 @@ try:
     from textual.binding import Binding
     from textual.containers import Container, Horizontal
     from textual.screen import ModalScreen
-    from textual.widgets import Button, Footer, Header, Input, Label, RadioButton, RadioSet, Static, TabbedContent, TabPane
+    from textual.widgets import Button, Footer, Header, Input, Label, RadioButton, RadioSet, Static
 except ImportError:
     App = None
 
@@ -218,11 +218,20 @@ def init_profile(profile_id: str) -> None:
     private_chmod(pdir)
 
 
+def _rmtree_onerror(func: Any, path: str, exc_info: Any) -> None:
+    """Retry Windows deletes after making files writable."""
+    try:
+        os.chmod(path, 0o700)
+        func(path)
+    except OSError:
+        raise exc_info[1]
+
+
 def remove_path(path: Path) -> None:
     if path.is_symlink() or path.is_file():
         path.unlink()
     elif path.is_dir():
-        shutil.rmtree(path)
+        shutil.rmtree(path, onerror=_rmtree_onerror)
 
 
 def copytree_clean(src: Path, dst: Path) -> None:
@@ -233,7 +242,14 @@ def copytree_clean(src: Path, dst: Path) -> None:
 
 def link_or_copy_dir(src: Path, dst: Path) -> str:
     if dst.exists() or dst.is_symlink():
-        remove_path(dst)
+        try:
+            remove_path(dst)
+        except OSError as exc:
+            fail(
+                f"Could not replace {dst}: {exc}\n"
+                "Close Claude/Codex and any terminals using that folder, then retry. "
+                "On Windows this often happens when Codex plugin cache files are locked."
+            )
 
     dst.parent.mkdir(parents=True, exist_ok=True)
 
@@ -484,8 +500,11 @@ def claude_credentials_file(root: Path) -> Path | None:
 
 
 def codex_credentials_file(root: Path) -> Path | None:
-    path = root / "auth.json"
-    return path if path.is_file() else None
+    for name in ("auth.json", "credentials.json"):
+        path = root / name
+        if path.is_file():
+            return path
+    return None
 
 
 def has_valid_credentials(tool: ToolName, root: Path) -> bool:
@@ -526,8 +545,8 @@ def credential_status_for_root(tool: ToolName, root: Path) -> str:
     if tool == "codex":
         path = codex_credentials_file(root)
         if not path:
-            return "no auth.json"
-        return "valid auth.json" if has_valid_credentials(tool, root) else "invalid auth.json"
+            return "no Codex credentials file"
+        return f"valid Codex credentials ({path.name})" if has_valid_credentials(tool, root) else f"invalid Codex credentials ({path.name})"
 
     return "unknown"
 
@@ -536,6 +555,39 @@ def credential_status(tool: ToolName, profile_id: str) -> str:
     if profile_id == "empty":
         return "empty credentials"
     return credential_status_for_root(tool, profile_tool_dir(profile_id, tool))
+
+
+def auto_import_existing_credentials() -> None:
+    """Save existing tool homes as first credentials so first run starts useful."""
+    ensure_dirs()
+    state = load_state()
+    changed = False
+
+    for tool in ["claude", "codex"]:
+        target = TOOL_TARGETS[tool]
+        if not has_valid_credentials(tool, target):
+            continue
+
+        has_saved = any(has_valid_credentials(tool, profile_tool_dir(meta.id, tool)) for meta in list_metas())
+        if has_saved:
+            continue
+
+        profile_id = f"{tool}-default"
+        init_profile(profile_id)
+        dest = profile_tool_dir(profile_id, tool)
+        if dest.exists() or dest.is_symlink():
+            remove_path(dest)
+        if target.is_symlink():
+            real = target.resolve()
+            shutil.copytree(real, dest)
+        else:
+            shutil.copytree(target, dest)
+        private_chmod(dest)
+        state.setdefault("active", {})[tool] = profile_id
+        changed = True
+
+    if changed:
+        save_state(state)
 
 
 def status_summary(identity: ToolIdentity) -> str:
@@ -568,6 +620,7 @@ def identity_for(meta: ProfileMeta, tool: ToolName) -> ToolIdentity:
 
 def print_status() -> None:
     ensure_dirs()
+    auto_import_existing_credentials()
     state = load_state()
     active = state.get("active", {})
     claude_id = active.get("claude", "empty")
@@ -620,6 +673,7 @@ def edit_profile_cli(profile_id: str) -> None:
 
 
 def print_profiles() -> None:
+    auto_import_existing_credentials()
     state = load_state()
     active = state.get("active", {})
 
@@ -689,6 +743,8 @@ if App is not None:
         #root { padding: 1 2; }
         #active { border: solid $accent; padding: 1 2; margin-bottom: 1; height: auto; }
         #buttons { height: auto; margin-top: 1; }
+        #tool_columns { height: 1fr; }
+        #claude_column, #codex_column { width: 1fr; padding: 0 1; }
         Button { margin-right: 1; margin-bottom: 1; }
         RadioSet { height: 1fr; border: solid $primary; padding: 1; }
         #status { border: solid $accent; padding: 1 2; margin-top: 1; height: auto; }
@@ -710,10 +766,10 @@ if App is not None:
             yield Header()
             yield Container(
                 Static(id="active"),
-                TabbedContent(
-                    TabPane("Claude", RadioSet(id="claude_profiles"), id="claude_tab"),
-                    TabPane("Codex", RadioSet(id="codex_profiles"), id="codex_tab"),
-                    id="tabs",
+                Horizontal(
+                    Container(Label("Claude credentials"), RadioSet(id="claude_profiles"), id="claude_column"),
+                    Container(Label("Codex credentials"), RadioSet(id="codex_profiles"), id="codex_column"),
+                    id="tool_columns",
                 ),
                 Static(id="status"),
                 Horizontal(
@@ -730,11 +786,6 @@ if App is not None:
         def on_mount(self) -> None:
             self.refresh_all()
 
-        def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
-            self.current_tool = "codex" if event.tab.id == "codex_tab-tab" else "claude"
-            self.refresh_active_panel()
-            self.refresh_status_panel()
-
         def refresh_all(self) -> None:
             self.refresh_active_panel()
             self.refresh_radio_lists()
@@ -749,7 +800,7 @@ if App is not None:
         def refresh_active_panel(self) -> None:
             state = load_state()
             active = state.get("active", {})
-            lines = ["Select the active credentials from the current agent tab."]
+            lines = ["Select a credential set under Claude or Codex, then choose an action. Save each Claude or Codex login once, then switch that tool between saved credentials."]
             for tool in ["claude", "codex"]:
                 pid = active.get(tool, "empty")
                 lines.append(f"{tool.capitalize()}: {pid} | target={TOOL_TARGETS[tool]} | {credential_status(tool, pid)}")
@@ -775,6 +826,13 @@ if App is not None:
             if not pressed or not pressed.id:
                 return None
             return pressed.id.split("::", 1)[1]
+
+        def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
+            if event.radio_set.id == "codex_profiles":
+                self.current_tool = "codex"
+            elif event.radio_set.id == "claude_profiles":
+                self.current_tool = "claude"
+            self.refresh_status_panel()
 
         def refresh_status_panel(self) -> None:
             state = load_state()
@@ -843,6 +901,7 @@ if App is not None:
 
 
 def run_tui() -> None:
+    auto_import_existing_credentials()
     if App is None:
         fail("Textual is not installed. Install dependencies or use the packaged binary.")
     LoginSwitcherApp().run()
@@ -851,14 +910,15 @@ def run_tui() -> None:
 def main() -> None:
     ensure_supported_os()
 
-    parser = argparse.ArgumentParser(prog=APP_NAME)
+    parser = argparse.ArgumentParser(prog=APP_NAME, description="Switch between saved Claude and Codex credentials. Use --help after any command for details.")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("tui")
-    sub.add_parser("status")
-    sub.add_parser("list")
+    sub.add_parser("tui", help="open the guided terminal UI")
+    sub.add_parser("status", help="show which Claude/Codex credentials are active")
+    sub.add_parser("list", help="list saved credential sets")
+    sub.add_parser("help", help="show this help message")
 
-    p_init = sub.add_parser("init")
+    p_init = sub.add_parser("init", help="create a saved credential set")
     p_init.add_argument("profile_id")
 
     p_edit = sub.add_parser("edit")
@@ -869,19 +929,25 @@ def main() -> None:
     p_switch.add_argument("profile_id", nargs="?")
     p_switch.add_argument("--empty", action="store_true")
 
-    p_capture = sub.add_parser("capture")
+    p_capture = sub.add_parser("capture", help="save the current home-folder credentials under a name")
     p_capture.add_argument("tool", choices=["claude", "codex"])
     p_capture.add_argument("profile_id")
 
-    p_refresh = sub.add_parser("refresh")
-    p_refresh.add_argument("tool", choices=["claude", "codex"])
-    p_refresh.add_argument("profile_id")
+    p_add = sub.add_parser("add", help="alias for capture: save current credentials under a name")
+    p_add.add_argument("tool", choices=["claude", "codex"])
+    p_add.add_argument("profile_id")
+
+    p_refresh = sub.add_parser("refresh", help="refresh metadata for the active credentials, or a specific tool/profile")
+    p_refresh.add_argument("tool", nargs="?", choices=["claude", "codex"])
+    p_refresh.add_argument("profile_id", nargs="?")
 
     sub.add_parser("refresh-active")
 
     args = parser.parse_args()
 
-    if args.cmd == "tui":
+    if args.cmd == "help":
+        parser.print_help()
+    elif args.cmd == "tui":
         run_tui()
     elif args.cmd == "status":
         print_status()
@@ -899,13 +965,22 @@ def main() -> None:
 
         switch_tool(args.tool, profile_id, refresh=True)
         print_status()
-    elif args.cmd == "capture":
+    elif args.cmd in {"capture", "add"}:
         capture_tool(args.tool, args.profile_id)
-        print(f"Captured {args.tool} credentials into profile: {args.profile_id}")
+        print(f"Saved {args.tool} credentials as: {args.profile_id}")
         print_status()
     elif args.cmd == "refresh":
-        switch_tool(args.tool, args.profile_id, refresh=False)
-        refresh_profile_identity(args.tool, args.profile_id)
+        if args.tool and args.profile_id:
+            switch_tool(args.tool, args.profile_id, refresh=False)
+            refresh_profile_identity(args.tool, args.profile_id)
+        elif not args.tool and not args.profile_id:
+            state = load_state()
+            for tool in ["claude", "codex"]:
+                pid = state.get("active", {}).get(tool, "empty")
+                if pid != "empty":
+                    refresh_profile_identity(tool, pid)
+        else:
+            fail("Use either 'refresh' for active credentials or 'refresh <claude|codex> <credential-set>'.")
         print_status()
     elif args.cmd == "refresh-active":
         state = load_state()
