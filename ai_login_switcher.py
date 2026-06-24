@@ -18,7 +18,7 @@ try:
     from textual.binding import Binding
     from textual.containers import Container, Horizontal
     from textual.screen import ModalScreen
-    from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static
+    from textual.widgets import Button, Footer, Header, Input, Label, RadioButton, RadioSet, Static, TabbedContent, TabPane
 except ImportError:
     App = None
 
@@ -467,19 +467,99 @@ def capture_tool(tool: ToolName, profile_id: str) -> None:
     switch_tool(tool, profile_id, refresh=True)
 
 
-def credential_status(tool: ToolName, profile_id: str) -> str:
-    root = profile_tool_dir(profile_id, tool)
+def read_json_file(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
 
-    if profile_id == "empty":
-        return "empty credentials"
 
+def claude_credentials_file(root: Path) -> Path | None:
+    for name in (".credentials.json", "credentials.json"):
+        path = root / name
+        if path.is_file():
+            return path
+    return None
+
+
+def codex_credentials_file(root: Path) -> Path | None:
+    path = root / "auth.json"
+    return path if path.is_file() else None
+
+
+def has_valid_credentials(tool: ToolName, root: Path) -> bool:
+    """Return whether a tool home contains a plausibly usable credentials file."""
     if tool == "claude":
-        return "has credentials" if (root / ".credentials.json").exists() else "no credentials file"
+        path = claude_credentials_file(root)
+        data = read_json_file(path) if path else None
+        if not data:
+            return False
+        return bool(
+            data.get("claudeAiOauth")
+            or data.get("oauthAccount")
+            or data.get("primaryApiKey")
+            or data.get("apiKey")
+        )
+
+    path = codex_credentials_file(root)
+    data = read_json_file(path) if path else None
+    if not data:
+        return False
+    return bool(
+        data.get("OPENAI_API_KEY")
+        or data.get("openai_api_key")
+        or data.get("api_key")
+        or data.get("tokens")
+        or data.get("id_token")
+        or data.get("access_token")
+    )
+
+
+def credential_status_for_root(tool: ToolName, root: Path) -> str:
+    if tool == "claude":
+        path = claude_credentials_file(root)
+        if not path:
+            return "no credentials file"
+        return f"valid credentials ({path.name})" if has_valid_credentials(tool, root) else f"invalid credentials ({path.name})"
 
     if tool == "codex":
-        return "has auth.json" if (root / "auth.json").exists() else "no auth.json"
+        path = codex_credentials_file(root)
+        if not path:
+            return "no auth.json"
+        return "valid auth.json" if has_valid_credentials(tool, root) else "invalid auth.json"
 
     return "unknown"
+
+
+def credential_status(tool: ToolName, profile_id: str) -> str:
+    if profile_id == "empty":
+        return "empty credentials"
+    return credential_status_for_root(tool, profile_tool_dir(profile_id, tool))
+
+
+def status_summary(identity: ToolIdentity) -> str:
+    raw = identity.raw_status or ""
+    data = try_load_json(raw)
+    parts: list[str] = []
+    if data:
+        for label, keys in [
+            ("model", {"model", "displayname", "modelid", "id"}),
+            ("context", {"usedpercentage", "contextusedpercent", "contextpercentage"}),
+            ("input", {"totalinputtokens", "inputtokens"}),
+            ("output", {"totaloutputtokens", "outputtokens"}),
+            ("cost", {"totalcostusd", "costusd", "cost"}),
+            ("limit", {"usedpercentage", "percentused"}),
+        ]:
+            value = deep_find_first(data, keys)
+            if value:
+                parts.append(f"{label}: {value}")
+    else:
+        for label in ["model", "context", "tokens", "cost", "rate limit", "usage"]:
+            value = extract_labeled_value(raw, [label])
+            if value:
+                parts.append(f"{label}: {value}")
+    return " | ".join(parts) if parts else (raw[:240] if raw else "No status available; run refresh after logging in.")
 
 
 def identity_for(meta: ProfileMeta, tool: ToolName) -> ToolIdentity:
@@ -606,64 +686,41 @@ if App is not None:
 
     class LoginSwitcherApp(App):
         CSS = """
-        #root {
-            padding: 1 2;
-        }
-
-        #active {
-            border: solid $accent;
-            padding: 1 2;
-            margin-bottom: 1;
-        }
-
-        #buttons {
-            height: auto;
-            margin-top: 1;
-        }
-
-        Button {
-            margin-right: 1;
-            margin-bottom: 1;
-        }
-
-        DataTable {
-            height: 1fr;
-        }
-
-        #edit-dialog {
-            width: 80;
-            height: auto;
-            border: thick $accent;
-            background: $surface;
-            padding: 1 2;
-        }
+        #root { padding: 1 2; }
+        #active { border: solid $accent; padding: 1 2; margin-bottom: 1; height: auto; }
+        #buttons { height: auto; margin-top: 1; }
+        Button { margin-right: 1; margin-bottom: 1; }
+        RadioSet { height: 1fr; border: solid $primary; padding: 1; }
+        #status { border: solid $accent; padding: 1 2; margin-top: 1; height: auto; }
+        #edit-dialog { width: 80; height: auto; border: thick $accent; background: $surface; padding: 1 2; }
         """
 
         BINDINGS = [
             Binding("q", "quit", "Quit"),
-            Binding("r", "refresh_table", "Refresh UI"),
-            Binding("c", "switch_claude", "Switch Claude"),
-            Binding("x", "switch_codex", "Switch Codex"),
-            Binding("1", "empty_claude", "Empty Claude"),
-            Binding("2", "empty_codex", "Empty Codex"),
-            Binding("e", "edit", "Edit"),
-            Binding("n", "new_profile", "New"),
-            Binding("f", "refresh_identity", "Fetch identity"),
+            Binding("r", "refresh_table", "Refresh"),
+            Binding("s", "switch_selected", "Select active"),
+            Binding("a", "add_login", "Add/login"),
+            Binding("d", "remove_selected", "Remove"),
+            Binding("f", "refresh_identity", "Fetch status"),
         ]
+
+        current_tool: ToolName = "claude"
 
         def compose(self) -> ComposeResult:
             yield Header()
             yield Container(
                 Static(id="active"),
-                DataTable(id="profiles"),
+                TabbedContent(
+                    TabPane("Claude", RadioSet(id="claude_profiles"), id="claude_tab"),
+                    TabPane("Codex", RadioSet(id="codex_profiles"), id="codex_tab"),
+                    id="tabs",
+                ),
+                Static(id="status"),
                 Horizontal(
-                    Button("Switch Claude", id="switch_claude", variant="primary"),
-                    Button("Switch Codex", id="switch_codex", variant="primary"),
-                    Button("Claude Empty", id="empty_claude"),
-                    Button("Codex Empty", id="empty_codex"),
-                    Button("Fetch Identity", id="refresh_identity"),
-                    Button("Edit", id="edit"),
-                    Button("New", id="new_profile"),
+                    Button("Set active", id="switch_selected", variant="primary"),
+                    Button("Add new/login", id="add_login", variant="success"),
+                    Button("Remove", id="remove_selected", variant="error"),
+                    Button("Fetch status", id="refresh_identity"),
                     id="buttons",
                 ),
                 id="root",
@@ -673,151 +730,113 @@ if App is not None:
         def on_mount(self) -> None:
             self.refresh_all()
 
+        def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+            self.current_tool = "codex" if event.tab.id == "codex_tab-tab" else "claude"
+            self.refresh_active_panel()
+            self.refresh_status_panel()
+
         def refresh_all(self) -> None:
             self.refresh_active_panel()
-            self.refresh_profile_table()
+            self.refresh_radio_lists()
+            self.refresh_status_panel()
+
+        def profile_label(self, meta: ProfileMeta, tool: ToolName) -> str:
+            ident = identity_for(meta, tool)
+            email = ident.email or "unknown email"
+            workspace = ident.workspace or "unknown workspace"
+            return f"{email} | {workspace} ({meta.id})"
 
         def refresh_active_panel(self) -> None:
             state = load_state()
             active = state.get("active", {})
-            claude_id = active.get("claude", "empty")
-            codex_id = active.get("codex", "empty")
-
-            lines = ["Active contexts"]
-
-            for tool, pid in [("claude", claude_id), ("codex", codex_id)]:
-                if pid == "empty":
-                    lines.append(f"{tool.capitalize()}: empty credentials")
-                    continue
-
-                meta = load_meta(pid)
-                ident = identity_for(meta, tool)
-                lines.append(
-                    f"{tool.capitalize()}: {pid} - {meta.label} | "
-                    f"{ident.email or 'unknown'} | "
-                    f"{ident.workspace or 'unknown'} | "
-                    f"{ident.auth_mode or 'unknown'} | "
-                    f"logged_in={ident.logged_in}"
-                )
-
-            lines.append(f"Claude target: {CLAUDE_TARGET}")
-            lines.append(f"Codex target:  {CODEX_TARGET}")
-
+            lines = ["Select the active credentials from the current agent tab."]
+            for tool in ["claude", "codex"]:
+                pid = active.get(tool, "empty")
+                lines.append(f"{tool.capitalize()}: {pid} | target={TOOL_TARGETS[tool]} | {credential_status(tool, pid)}")
             self.query_one("#active", Static).update("\n".join(lines))
 
-        def refresh_profile_table(self) -> None:
-            table = self.query_one("#profiles", DataTable)
-            table.clear(columns=True)
-            table.add_columns(
-                "ID",
-                "Name",
-                "Claude email",
-                "Claude workspace",
-                "Claude mode",
-                "Codex email",
-                "Codex workspace",
-                "Codex mode",
-                "Notes",
-            )
+        def refresh_radio_lists(self) -> None:
+            state = load_state()
+            active = state.get("active", {})
+            metas = list_metas()
+            for tool in ["claude", "codex"]:
+                radio = self.query_one(f"#{tool}_profiles", RadioSet)
+                radio.remove_children()
+                empty_pressed = active.get(tool) == "empty"
+                radio.mount(RadioButton("empty credentials", id=f"{tool}::empty", value=empty_pressed))
+                for meta in metas:
+                    pressed = active.get(tool) == meta.id
+                    radio.mount(RadioButton(self.profile_label(meta, tool), id=f"{tool}::{meta.id}", value=pressed))
 
-            for meta in list_metas():
-                table.add_row(
-                    meta.id,
-                    meta.custom_name,
-                    meta.claude.email or "unknown",
-                    meta.claude.workspace or "unknown",
-                    meta.claude.auth_mode or "unknown",
-                    meta.codex.email or "unknown",
-                    meta.codex.workspace or "unknown",
-                    meta.codex.auth_mode or "unknown",
-                    meta.notes,
-                    key=meta.id,
-                )
-
-        def selected_profile_id(self) -> str | None:
-            table = self.query_one("#profiles", DataTable)
-            if table.cursor_row < 0 or not table.rows:
+        def selected_profile_id(self, tool: ToolName | None = None) -> str | None:
+            tool = tool or self.current_tool
+            radio = self.query_one(f"#{tool}_profiles", RadioSet)
+            pressed = radio.pressed_button
+            if not pressed or not pressed.id:
                 return None
-            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-            return str(row_key.value)
+            return pressed.id.split("::", 1)[1]
+
+        def refresh_status_panel(self) -> None:
+            state = load_state()
+            pid = state.get("active", {}).get(self.current_tool, "empty")
+            if pid == "empty":
+                text = f"{self.current_tool.capitalize()} status: empty credentials"
+            else:
+                meta = load_meta(pid)
+                ident = identity_for(meta, self.current_tool)
+                text = f"{self.current_tool.capitalize()} active token/status\n{status_summary(ident)}"
+            self.query_one("#status", Static).update(text)
 
         def action_refresh_table(self) -> None:
             self.refresh_all()
 
-        def action_switch_claude(self) -> None:
+        def action_switch_selected(self) -> None:
             pid = self.selected_profile_id()
             if pid:
-                switch_tool("claude", pid, refresh=True)
+                switch_tool(self.current_tool, pid, refresh=True)
                 self.refresh_all()
 
-        def action_switch_codex(self) -> None:
-            pid = self.selected_profile_id()
-            if pid:
-                switch_tool("codex", pid, refresh=True)
-                self.refresh_all()
-
-        def action_empty_claude(self) -> None:
-            switch_tool("claude", "empty", refresh=False)
-            self.refresh_all()
-
-        def action_empty_codex(self) -> None:
-            switch_tool("codex", "empty", refresh=False)
-            self.refresh_all()
-
-        def action_refresh_identity(self) -> None:
-            pid = self.selected_profile_id()
-            if not pid:
-                return
-
-            state = load_state()
-            active = state.get("active", {})
-
-            if active.get("claude") == pid:
-                refresh_profile_identity("claude", pid)
-
-            if active.get("codex") == pid:
-                refresh_profile_identity("codex", pid)
-
-            self.refresh_all()
-
-        def action_edit(self) -> None:
-            pid = self.selected_profile_id()
-            if not pid:
-                return
-
-            meta = load_meta(pid)
-
-            def after_edit(updated: ProfileMeta | None) -> None:
-                if updated:
-                    save_meta(updated)
-                    self.refresh_all()
-
-            self.push_screen(EditMetaScreen(meta), after_edit)
-
-        def action_new_profile(self) -> None:
+        def action_add_login(self) -> None:
             def after_new(profile_id: str | None) -> None:
                 if not profile_id:
                     return
                 try:
                     init_profile(profile_id)
+                    switch_tool(self.current_tool, "empty", refresh=False)
+                    self.notify(f"Empty {self.current_tool} credentials activated. Run login, then capture {profile_id}.")
                 except Exception as exc:
                     self.notify(str(exc), severity="error")
                     return
                 self.refresh_all()
-
             self.push_screen(NewProfileScreen(), after_new)
+
+        def action_remove_selected(self) -> None:
+            pid = self.selected_profile_id()
+            if not pid or pid == "empty":
+                return
+            pdir = profile_dir(pid)
+            if pdir.exists():
+                remove_path(pdir)
+            state = load_state()
+            for tool in ["claude", "codex"]:
+                if state.get("active", {}).get(tool) == pid:
+                    state["active"][tool] = "empty"
+            save_state(state)
+            self.refresh_all()
+
+        def action_refresh_identity(self) -> None:
+            pid = load_state().get("active", {}).get(self.current_tool, "empty")
+            if pid != "empty":
+                refresh_profile_identity(self.current_tool, pid)
+            self.refresh_all()
 
         def on_button_pressed(self, event: Button.Pressed) -> None:
             mapping = {
-                "switch_claude": self.action_switch_claude,
-                "switch_codex": self.action_switch_codex,
-                "empty_claude": self.action_empty_claude,
-                "empty_codex": self.action_empty_codex,
+                "switch_selected": self.action_switch_selected,
+                "add_login": self.action_add_login,
+                "remove_selected": self.action_remove_selected,
                 "refresh_identity": self.action_refresh_identity,
-                "edit": self.action_edit,
-                "new_profile": self.action_new_profile,
             }
-
             action = mapping.get(event.button.id or "")
             if action:
                 action()
